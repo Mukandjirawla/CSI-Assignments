@@ -1,0 +1,80 @@
+objective : Implement a Linked List in Python Using OOP and Delete the Nth Node
+
+class Node:
+    def __init__(self, data):
+        self.data = data
+        self.next = None
+
+class LinkedList:
+    def __init__(self):
+        self.head = None
+        self.size = 0
+    
+    def append(self, data):
+        new_node = Node(data)
+        if not self.head:
+            self.head = new_node
+        else:
+            current = self.head
+            while current.next:
+                current = current.next
+            current.next = new_node
+        self.size += 1
+    
+    def print_list(self):
+        if not self.head:
+            print("Empty")
+            return
+        elements = []
+        current = self.head
+        while current:
+            elements.append(str(current.data))
+            current = current.next
+        print(" -> ".join(elements))
+    
+    def delete_nth_node(self, n):
+        if not self.head:
+            raise ValueError("Empty list")
+        if n < 1 or n > self.size:
+            raise ValueError(f"Index {n} out of range (1-{self.size})")
+        
+        if n == 1:
+            self.head = self.head.next
+        else:
+            current = self.head
+            for i in range(n - 2):
+                current = current.next
+            current.next = current.next.next
+        self.size -= 1
+
+# Test
+ll = LinkedList()
+
+# Add elements
+for val in [10, 20, 30, 40, 50]:
+    ll.append(val)
+print("Original:", end=" ")
+ll.print_list()
+
+# Delete 3rd node
+ll.delete_nth_node(3)
+print("After deleting 3rd node:", end=" ")
+ll.print_list()
+
+# Delete 1st node
+ll.delete_nth_node(1)
+print("After deleting 1st node:", end=" ")
+ll.print_list()
+
+# Error handling tests
+try:
+    ll.delete_nth_node(10)
+except ValueError as e:
+    print(f"Error: {e}")
+
+# Empty list test
+empty_ll = LinkedList()
+try:
+    empty_ll.delete_nth_node(1)
+except ValueError as e:
+    print(f"Error: {e}")
