@@ -1,0 +1,140 @@
+objective : Conduct an in-depth Exploratory Data Analysis on a complex dataset. Focus on understanding data distributions, identifying missing values, detecting outliers, and uncovering relationships between variables. Utilize visualizations like histograms, box plots, and heatmaps to support your findings.
+Resources :
+https://www.kaggle.com/code/junaiddata35/titanic-dataset-exploratory-data-analysis-eda
+
+code:
+# Import libraries
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.ensemble import RandomForestRegressor
+
+# Load Titanic dataset
+titanic = sns.load_dataset('titanic')
+
+# Basic overview
+print("Shape of dataset:", titanic.shape)
+print("\nColumns:\n", titanic.columns.tolist())
+print("\nMissing values:\n", titanic.isnull().sum())
+print("\nData types:\n", titanic.dtypes)
+print("\nSummary statistics:\n", titanic.describe(include='all'))
+
+# Missing value heatmap
+plt.figure(figsize=(10, 6))
+sns.heatmap(titanic.isnull(), cmap='viridis', cbar=False, yticklabels=False)
+plt.title("Missing Values Heatmap")
+plt.show()
+
+# =====================
+# Missing Value Imputation
+# =====================
+titanic_filled = titanic.copy()
+
+# Numeric & categorical separation
+num_cols = titanic_filled.select_dtypes(include='number').columns
+cat_cols = titanic_filled.select_dtypes(exclude='number').columns
+
+# Impute numeric features using RandomForest
+imputer = IterativeImputer(estimator=RandomForestRegressor(), random_state=0)
+titanic_filled[num_cols] = imputer.fit_transform(titanic_filled[num_cols])
+
+# Fill categorical with mode
+for col in cat_cols:
+    titanic_filled[col].fillna(titanic_filled[col].mode()[0], inplace=True)
+
+print("\nMissing values after imputation:\n", titanic_filled.isnull().sum())
+
+# =====================
+# Univariate Visualizations
+# =====================
+
+# Survival count
+sns.countplot(x='survived', data=titanic_filled)
+plt.title("Survival Count")
+plt.show()
+
+# Pclass distribution
+sns.countplot(x='pclass', data=titanic_filled)
+plt.title("Passenger Class Distribution")
+plt.show()
+
+# Gender distribution
+sns.countplot(x='sex', data=titanic_filled)
+plt.title("Sex Distribution")
+plt.show()
+
+# Age distribution
+sns.histplot(data=titanic_filled, x='age', kde=True, bins=30)
+plt.title("Age Distribution")
+plt.show()
+
+# Fare distribution
+sns.histplot(data=titanic_filled, x='fare', kde=True, bins=40)
+plt.title("Fare Distribution")
+plt.show()
+
+# =====================
+# Bivariate / Multivariate Analysis
+# =====================
+
+# Survival by Gender
+sns.countplot(x='sex', hue='survived', data=titanic_filled)
+plt.title("Survival by Gender")
+plt.show()
+
+# Survival by Pclass
+sns.countplot(x='pclass', hue='survived', data=titanic_filled)
+plt.title("Survival by Passenger Class")
+plt.show()
+
+# Survival by Age Group
+bins = [0, 12, 18, 40, 60, 80]
+labels = ['Child', 'Teenager', 'Adult', 'Middle-aged', 'Senior']
+titanic_filled['age_group'] = pd.cut(titanic_filled['age'], bins=bins, labels=labels)
+
+sns.countplot(x='age_group', hue='survived', data=titanic_filled, palette='magma')
+plt.title("Survival by Age Group")
+plt.show()
+
+# Survival by Embarkation
+sns.countplot(x='embarked', hue='survived', data=titanic_filled, palette='Set2')
+plt.title("Survival by Embarkation Point")
+plt.show()
+
+# Fare vs Survival
+sns.histplot(x='fare', hue='survived', data=titanic_filled, bins=30, kde=True)
+plt.title("Fare Distribution by Survival")
+plt.show()
+
+# =====================
+# Derived Feature: Family Size
+# =====================
+
+titanic_filled['family_size'] = titanic_filled['sibsp'] + titanic_filled['parch']
+
+sns.countplot(x='family_size', hue='survived', data=titanic_filled, palette='cubehelix')
+plt.title("Survival Based on Family Size")
+plt.xlabel("Family Size")
+plt.show()
+
+# =====================
+# Survival by Gender & Class
+# =====================
+
+print(titanic_filled.groupby(['sex', 'pclass'])['survived'].value_counts())
+
+sns.catplot(x='sex', hue='survived', col='pclass', kind='count', data=titanic_filled)
+plt.suptitle("Survival by Gender and Class", y=1.05)
+plt.show()
+
+# =====================
+# Correlation Heatmap
+# =====================
+
+plt.figure(figsize=(12, 8))
+sns.heatmap(titanic_filled.select_dtypes(include='number').corr(), annot=True, cmap='coolwarm', fmt=".2f")
+plt.title("Correlation Heatmap")
+plt.show()
