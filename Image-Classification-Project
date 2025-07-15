@@ -1,0 +1,519 @@
+import numpy as np
+import pandas as pd
+import cv2
+import os
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from skimage.feature import local_binary_pattern, greycomatrix, greycoprops
+from skimage.measure import regionprops
+from skimage.color import rgb2gray, rgb2hsv
+from skimage.filters import sobel
+from skimage.morphology import disk
+from skimage.filters.rank import entropy
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import List, Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+class DatasetLoader:
+    """Dataset loading utilities for image classification datasets."""
+    
+    def load_plant_pathology_2020(self, data_dir: str, split: str = 'train') -> Tuple[pd.DataFrame, str]:
+        """Load Plant Pathology 2020 dataset."""
+        csv_file = os.path.join(data_dir, f'{split}.csv')
+        images_dir = os.path.join(data_dir, 'images')
+        
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"CSV file not found: {csv_file}")
+        if not os.path.exists(images_dir):
+            raise FileNotFoundError(f"Images directory not found: {images_dir}")
+        
+        df = pd.read_csv(csv_file)
+        print(f"Loaded {len(df)} samples from {csv_file}")
+        
+        if split == 'train':
+            label_columns = [col for col in df.columns if col not in ['image_id']]
+            print(f"Label columns: {label_columns}")
+            for col in label_columns:
+                if df[col].dtype in ['int64', 'float64']:
+                    print(f"{col}: {df[col].sum()} positive samples")
+        
+        return df, images_dir
+    
+    def load_from_folders(self, data_dir: str) -> Tuple[pd.DataFrame, str]:
+        """Load dataset from folder structure (one folder per class)."""
+        extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        
+        if not os.path.exists(data_dir):
+            raise FileNotFoundError(f"Data directory not found: {data_dir}")
+        
+        image_paths = []
+        labels = []
+        
+        classes = [d for d in os.listdir(data_dir) 
+                  if os.path.isdir(os.path.join(data_dir, d))]
+        
+        if not classes:
+            raise ValueError(f"No class folders found in {data_dir}")
+        
+        print(f"Found {len(classes)} classes: {classes}")
+        
+        for class_name in classes:
+            class_dir = os.path.join(data_dir, class_name)
+            class_images = []
+            for ext in extensions:
+                class_images.extend([f for f in os.listdir(class_dir) 
+                                   if f.lower().endswith(ext.lower())])
+            
+            print(f"Class '{class_name}': {len(class_images)} images")
+            
+            for img_file in class_images:
+                image_paths.append(os.path.join(class_name, img_file))
+                labels.append(class_name)
+        
+        df = pd.DataFrame({
+            'image_id': image_paths,
+            'label': labels
+        })
+        
+        print(f"Total samples: {len(df)}")
+        print(f"Class distribution:\n{df['label'].value_counts()}")
+        
+        return df, data_dir
+    
+    def load_custom_csv(self, csv_path: str, images_dir: str, 
+                       image_col: str = 'image_id', label_col: str = 'label') -> Tuple[pd.DataFrame, str]:
+        """Load custom dataset from CSV file."""
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        if not os.path.exists(images_dir):
+            raise FileNotFoundError(f"Images directory not found: {images_dir}")
+        
+        df = pd.read_csv(csv_path)
+        print(f"Loaded {len(df)} samples from {csv_path}")
+        
+        if image_col not in df.columns:
+            raise ValueError(f"Image column '{image_col}' not found in CSV")
+        if label_col not in df.columns:
+            raise ValueError(f"Label column '{label_col}' not found in CSV")
+        
+        df = df.rename(columns={image_col: 'image_id', label_col: 'label'})
+        print(f"Class distribution:\n{df['label'].value_counts()}")
+        
+        return df, images_dir
+
+class ImageFeatureExtractor:
+    """Feature extraction class for traditional ML image classification."""
+    
+    def __init__(self, target_size=(224, 224)):
+        self.target_size = target_size
+        
+    def preprocess_image(self, image_path: str) -> np.ndarray:
+        """Load and preprocess image."""
+        try:
+            image = cv2.imread(image_path)
+            if image is None:
+                raise ValueError(f"Could not load image: {image_path}")
+            
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = cv2.resize(image, self.target_size)
+            
+            return image
+        except Exception as e:
+            print(f"Error processing {image_path}: {str(e)}")
+            return None
+    
+    def extract_color_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract color-based features."""
+        features = []
+        
+        # RGB statistics
+        for channel in range(3):
+            channel_data = image[:, :, channel].flatten()
+            features.extend([
+                np.mean(channel_data),
+                np.std(channel_data),
+                np.min(channel_data),
+                np.max(channel_data),
+                np.median(channel_data),
+                np.percentile(channel_data, 25),
+                np.percentile(channel_data, 75)
+            ])
+        
+        # HSV statistics
+        hsv = rgb2hsv(image)
+        for channel in range(3):
+            channel_data = hsv[:, :, channel].flatten()
+            features.extend([
+                np.mean(channel_data),
+                np.std(channel_data),
+                np.median(channel_data)
+            ])
+        
+        # Color histograms
+        for channel in range(3):
+            hist = cv2.calcHist([image], [channel], None, [32], [0, 256])
+            features.extend(hist.flatten())
+        
+        return np.array(features)
+    
+    def extract_texture_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract texture-based features using LBP and GLCM."""
+        features = []
+        
+        gray = rgb2gray(image)
+        gray_uint8 = (gray * 255).astype(np.uint8)
+        
+        # Local Binary Pattern
+        radius = 3
+        n_points = 8 * radius
+        lbp = local_binary_pattern(gray, n_points, radius, method='uniform')
+        
+        lbp_hist, _ = np.histogram(lbp.ravel(), bins=n_points + 2, 
+                                  range=(0, n_points + 2), density=True)
+        features.extend(lbp_hist)
+        
+        # GLCM features
+        distances = [1, 2, 3]
+        angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
+        
+        for distance in distances:
+            glcm = greycomatrix(gray_uint8, distances=[distance], 
+                              angles=angles, levels=256, symmetric=True, normed=True)
+            
+            properties = ['contrast', 'dissimilarity', 'homogeneity', 
+                         'energy', 'correlation', 'ASM']
+            
+            for prop in properties:
+                prop_values = greycoprops(glcm, prop)
+                features.extend([
+                    np.mean(prop_values),
+                    np.std(prop_values)
+                ])
+        
+        # Entropy
+        entropy_img = entropy(gray_uint8, disk(5))
+        features.extend([
+            np.mean(entropy_img),
+            np.std(entropy_img)
+        ])
+        
+        return np.array(features)
+    
+    def extract_shape_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract shape-based features."""
+        features = []
+        
+        gray = rgb2gray(image)
+        threshold = np.mean(gray)
+        binary = gray > threshold
+        
+        # Region properties
+        try:
+            regions = regionprops(binary.astype(int))
+            if regions:
+                region = regions[0]
+                features.extend([
+                    region.area,
+                    region.perimeter,
+                    region.eccentricity,
+                    region.solidity,
+                    region.extent,
+                    region.major_axis_length,
+                    region.minor_axis_length,
+                    region.orientation
+                ])
+            else:
+                features.extend([0] * 8)
+        except:
+            features.extend([0] * 8)
+        
+        # Edge features
+        edges = sobel(gray)
+        features.extend([
+            np.sum(edges),
+            np.mean(edges),
+            np.std(edges)
+        ])
+        
+        return np.array(features)
+    
+    def extract_statistical_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract statistical features."""
+        features = []
+        
+        gray = rgb2gray(image)
+        features.extend([
+            np.mean(gray),
+            np.std(gray),
+            np.var(gray),
+            np.min(gray),
+            np.max(gray),
+            np.median(gray),
+            np.percentile(gray, 25),
+            np.percentile(gray, 75)
+        ])
+        
+        # Hu moments
+        moments = cv2.moments(gray)
+        hu_moments = cv2.HuMoments(moments).flatten()
+        features.extend(hu_moments)
+        
+        return np.array(features)
+    
+    def extract_all_features(self, image_path: str) -> np.ndarray:
+        """Extract all features from an image."""
+        image = self.preprocess_image(image_path)
+        if image is None:
+            return None
+        
+        color_features = self.extract_color_features(image)
+        texture_features = self.extract_texture_features(image)
+        shape_features = self.extract_shape_features(image)
+        statistical_features = self.extract_statistical_features(image)
+        
+        all_features = np.concatenate([
+            color_features,
+            texture_features,
+            shape_features,
+            statistical_features
+        ])
+        
+        return all_features
+
+class TraditionalMLClassifier:
+    """Main classifier class for traditional ML image classification."""
+    
+    def __init__(self, target_size=(224, 224)):
+        self.feature_extractor = ImageFeatureExtractor(target_size)
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.pca = PCA(n_components=0.95)
+        self.models = {}
+        self.best_model = None
+        self.best_model_name = None
+        
+    def prepare_dataset(self, data_df: pd.DataFrame, image_dir: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare dataset by extracting features from images."""
+        features_list = []
+        labels_list = []
+        
+        print("Extracting features from images...")
+        
+        for idx, row in data_df.iterrows():
+            if idx % 100 == 0:
+                print(f"Processed {idx}/{len(data_df)} images")
+            
+            image_path = os.path.join(image_dir, row['image_id'])
+            features = self.feature_extractor.extract_all_features(image_path)
+            
+            if features is not None:
+                features_list.append(features)
+                
+                # Handle Plant Pathology multi-label format
+                if 'healthy' in row and 'multiple_diseases' in row:
+                    if row['healthy'] == 1:
+                        label = 'healthy'
+                    elif row['multiple_diseases'] == 1:
+                        label = 'multiple_diseases'
+                    elif row['rust'] == 1:
+                        label = 'rust'
+                    elif row['scab'] == 1:
+                        label = 'scab'
+                    else:
+                        label = 'unknown'
+                else:
+                    label = row['label'] if 'label' in row else 'unknown'
+                
+                labels_list.append(label)
+        
+        X = np.array(features_list)
+        y = np.array(labels_list)
+        
+        print(f"Feature extraction complete. Shape: {X.shape}")
+        return X, y
+    
+    def train_models(self, X: np.ndarray, y: np.ndarray, test_size=0.2, random_state=42):
+        """Train multiple ML models and compare performance."""
+        
+        y_encoded = self.label_encoder.fit_transform(y)
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_encoded, test_size=test_size, random_state=random_state, stratify=y_encoded
+        )
+        
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        X_train_pca = self.pca.fit_transform(X_train_scaled)
+        X_test_pca = self.pca.transform(X_test_scaled)
+        
+        print(f"Feature dimensions after PCA: {X_train_pca.shape[1]}")
+        
+        models_config = {
+            'Random Forest': {
+                'model': RandomForestClassifier(random_state=random_state),
+                'params': {
+                    'n_estimators': [100, 200],
+                    'max_depth': [10, 20, None],
+                    'min_samples_split': [2, 5]
+                }
+            },
+            'SVM': {
+                'model': SVC(random_state=random_state),
+                'params': {
+                    'C': [0.1, 1, 10],
+                    'kernel': ['rbf', 'poly'],
+                    'gamma': ['scale', 'auto']
+                }
+            },
+            'Gradient Boosting': {
+                'model': GradientBoostingClassifier(random_state=random_state),
+                'params': {
+                    'n_estimators': [100, 200],
+                    'learning_rate': [0.01, 0.1],
+                    'max_depth': [3, 5]
+                }
+            }
+        }
+        
+        best_score = 0
+        results = {}
+        
+        for model_name, config in models_config.items():
+            print(f"\nTraining {model_name}...")
+            
+            grid_search = GridSearchCV(
+                config['model'],
+                config['params'],
+                cv=3,
+                scoring='accuracy',
+                n_jobs=-1
+            )
+            
+            grid_search.fit(X_train_pca, y_train)
+            best_model = grid_search.best_estimator_
+            
+            train_score = best_model.score(X_train_pca, y_train)
+            test_score = best_model.score(X_test_pca, y_test)
+            
+            cv_scores = cross_val_score(best_model, X_train_pca, y_train, cv=3)
+            
+            results[model_name] = {
+                'model': best_model,
+                'train_score': train_score,
+                'test_score': test_score,
+                'cv_mean': cv_scores.mean(),
+                'cv_std': cv_scores.std(),
+                'best_params': grid_search.best_params_
+            }
+            
+            print(f"Train accuracy: {train_score:.4f}")
+            print(f"Test accuracy: {test_score:.4f}")
+            print(f"CV accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+            
+            if test_score > best_score:
+                best_score = test_score
+                self.best_model = best_model
+                self.best_model_name = model_name
+        
+        self.models = results
+        self.X_test_pca = X_test_pca
+        self.y_test = y_test
+        
+        return results
+    
+    def evaluate_best_model(self):
+        """Evaluate the best performing model."""
+        if self.best_model is None:
+            print("No model trained yet!")
+            return
+        
+        print(f"\nBest Model: {self.best_model_name}")
+        print("=" * 50)
+        
+        y_pred = self.best_model.predict(self.X_test_pca)
+        accuracy = accuracy_score(self.y_test, y_pred)
+        print(f"Test Accuracy: {accuracy:.4f}")
+        
+        target_names = self.label_encoder.classes_
+        print("\nClassification Report:")
+        print(classification_report(self.y_test, y_pred, target_names=target_names))
+        
+        cm = confusion_matrix(self.y_test, y_pred)
+        
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=target_names, yticklabels=target_names)
+        plt.title(f'Confusion Matrix - {self.best_model_name}')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        plt.tight_layout()
+        plt.show()
+    
+    def predict(self, image_path: str) -> str:
+        """Predict the class of a single image."""
+        if self.best_model is None:
+            return "No model trained yet!"
+        
+        features = self.feature_extractor.extract_all_features(image_path)
+        if features is None:
+            return "Error processing image"
+        
+        features_scaled = self.scaler.transform(features.reshape(1, -1))
+        features_pca = self.pca.transform(features_scaled)
+        
+        prediction = self.best_model.predict(features_pca)[0]
+        predicted_label = self.label_encoder.inverse_transform([prediction])[0]
+        
+        if hasattr(self.best_model, 'predict_proba'):
+            probabilities = self.best_model.predict_proba(features_pca)[0]
+            confidence = np.max(probabilities)
+            return f"Predicted: {predicted_label} (Confidence: {confidence:.4f})"
+        else:
+            return f"Predicted: {predicted_label}"
+
+def main():
+    """Main function demonstrating the classification system."""
+    
+    loader = DatasetLoader()
+    classifier = TraditionalMLClassifier(target_size=(224, 224))
+    
+    print("=== Traditional ML Image Classification System ===\n")
+    
+    # Example: Load Plant Pathology dataset
+    try:
+        data_dir = "path/to/plant-pathology-2020-fgvc7"
+        df, images_dir = loader.load_plant_pathology_2020(data_dir, split='train')
+        
+        print(f"Successfully loaded dataset with {len(df)} samples")
+        
+        # Extract features and train
+        X, y = classifier.prepare_dataset(df, images_dir)
+        results = classifier.train_models(X, y)
+        classifier.evaluate_best_model()
+        
+        # Test prediction
+        sample_image = os.path.join(images_dir, df.iloc[0]['image_id'])
+        prediction = classifier.predict(sample_image)
+        print(f"\nSample prediction: {prediction}")
+        
+    except FileNotFoundError as e:
+        print(f"Dataset not found: {e}")
+        print("Please download the Plant Pathology 2020 dataset from:")
+        print("https://www.kaggle.com/c/plant-pathology-2020-fgvc7/data")
+    
+    print("\n=== Usage Instructions ===")
+    print("1. Load dataset: loader.load_plant_pathology_2020() or loader.load_from_folders()")
+    print("2. Extract features: classifier.prepare_dataset()")
+    print("3. Train models: classifier.train_models()")
+    print("4. Evaluate: classifier.evaluate_best_model()")
+    print("5. Predict: classifier.predict()")
+
+if __name__ == "__main__":
+    main()
